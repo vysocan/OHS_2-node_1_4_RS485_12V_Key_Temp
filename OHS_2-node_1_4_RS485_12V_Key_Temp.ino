@@ -23,14 +23,23 @@
 //#include <SoftwareSerial.h>
 //SoftwareSerial mySerial(A4, A5); // RX, TX
 
-#define MY_ADDRESS 1    // 0 is gateway, 15 is multicast
-#define LED_GREEN  5    // iButton probe LED
-#define LED_RED    4    // iButton probe LED
-#define SPEAKER    7    // Speaker pin
-#define DE         3    // RS 485 DE pin
-#define VERSION    140  // Version of EEPROM struct
-#define REG_LEN    21   // size of one conf. element
-#define RS485_REPEAT 5   // repeat sending
+// Node settings
+#define VERSION         140
+#define PING_DELAY      1200000 // In milliseconds, 20 minutes
+#define SENSOR_DELAY    600000  // In milliseconds, 10 minutes
+// Constants
+#define REG_LEN         21   // Size of one conf. element
+#define NODE_NAME_SIZE  16   // As defined in gateway
+#define KEY_DELAY_ARMED 400  // Send key delay, for other then disarmed mode, allows faster disarm. 
+#define KEY_DELAY       1400 // Send key delay, for disarmed mode
+// Pins
+#define LED_GREEN       5    // iButton probe LED
+#define LED_RED         4    // iButton probe LED
+#define SPEAKER         7    // Speaker pin
+#define DE              3    // RS 485 DE pin
+// RS485
+#define MY_ADDRESS      1    // 0 is gateway, 15 is multicast
+#define RS485_REPEAT    5    // repeat sending
 
 OneWire ds(6);          // Dallas reader on pin with  4k7 pull-up rezistor
 RS485_msg in_msg, out_msg; 
@@ -42,6 +51,7 @@ uint8_t  key[8];              // Dallas chip
 uint8_t  mode = 0;
 uint8_t  pos;
 int8_t   iButtonRead = 0;
+uint16_t keyDelay = KEY_DELAY;
 unsigned long previousMillis = 0;
 unsigned long readerMillis = 0;
 unsigned long tempMillis = 0;
@@ -71,11 +81,12 @@ union u_tag {
     uint8_t  b[4];
     float    fval;
 } u;
-
-// Registration
-void send_conf(){
+/*
+ * Registration
+ */
+void sendConf(){
   int8_t result;
-  delay(MY_ADDRESS*200); // Wait some time to avoid contention
+  delay(MY_ADDRESS * 1000); // Wait some time to avoid contention
   out_msg.address = 0;
   out_msg.ack = FLAG_ACK;
   out_msg.ctrl = FLAG_DTA;
@@ -94,50 +105,69 @@ void send_conf(){
     tone(SPEAKER, notes[7]);  delay(100); tone(SPEAKER, notes[0]);  delay(100); noTone(SPEAKER);
   }
 }
-
-// Set defaults on first time
+/*
+ * Set defaults on first time
+ */
 void setDefault(){
   conf.version = VERSION;   // Change VERSION to take effect
-  conf.reg[0]  = 'K';       // Key
-  conf.reg[1]  = 'i';       // iButton
-  conf.reg[2]  = 0;         // Local address, must be odd number
-  conf.reg[3]  = B00000000; // Default setting
-  conf.reg[4]  = B00011111; // Default setting, group=16, disabled
-  for (uint8_t ii=0; ii < 17; ii++){ conf.reg[5+ii] = 0;} // Placeholder for name
-  conf.reg[21] = 'S';       // Sensor
-  conf.reg[22] = 'T';       // Temperature
-  conf.reg[23] = 0;         // Local address
-  conf.reg[24] = B00000000; // Default setting
-  conf.reg[25] = B00011111; // Default setting, group=16, disabled
-  for (uint8_t ii=0; ii < 17; ii++){ conf.reg[26+ii] = 0;}
+  conf.reg[0+(REG_LEN*0)]  = 'K';       // Key
+  conf.reg[1+(REG_LEN*0)]  = 'i';       // iButton
+  conf.reg[2+(REG_LEN*0)]  = 0;         // Local address, must be odd number
+  conf.reg[3+(REG_LEN*0)]  = B00000000; // Default setting
+  conf.reg[4+(REG_LEN*0)]  = B00011111; // Default setting, group='not set', enabled
+  memset(&conf.reg[5+(REG_LEN*0)], 0, NODE_NAME_SIZE);
+  conf.reg[0+(REG_LEN*1)]  = 'S';       // Sensor
+  conf.reg[1+(REG_LEN*1)]  = 'T';       // Temperature
+  conf.reg[2+(REG_LEN*1)]  = 0;         // Local address
+  conf.reg[3+(REG_LEN*1)]  = B00000000; // Default setting
+  conf.reg[4+(REG_LEN*1)]  = B00011111; // Default setting, group='not set', enabled
+  memset(&conf.reg[5+(REG_LEN*1)], 0, NODE_NAME_SIZE);
+  strcpy(&conf.reg[5+(REG_LEN*1)], "Temperature"); // Set default name
 }
-
+/*
+ * Send float value to gateway 
+ */
+void sendValue(uint8_t element, float value) {
+  u.fval = value; 
+  out_msg.address = 0;
+  out_msg.ctrl = FLAG_DTA;
+  out_msg.data_length = 7;
+  out_msg.buffer[0] = conf.reg[(REG_LEN*element)];
+  out_msg.buffer[1] = conf.reg[1+(REG_LEN*element)];
+  out_msg.buffer[2] = conf.reg[2+(REG_LEN*element)];
+  out_msg.buffer[3] = u.b[0]; out_msg.buffer[4] = u.b[1];
+  out_msg.buffer[5] = u.b[2]; out_msg.buffer[6] = u.b[3];   
+  // Send to GW 
+  RS485.sendMsgWithAck(&out_msg, RS485_REPEAT);
+}
+/*
+ * setup
+ */
 void setup() {
   pinMode(DE, OUTPUT);
   pinMode(LED_GREEN, OUTPUT);
   pinMode(LED_RED, OUTPUT);  
   pinMode(A5, OUTPUT);
   pinMode(A3, OUTPUT);
-  // SoftwareSerial digitalWrite(A5, LOW);
-  // SoftwareSerial digitalWrite(A3, LOW);
-  
-  RS485.begin(19200, MY_ADDRESS);
 
   eeprom_read_block((void*)&conf, (void*)0, sizeof(conf)); // Read current configuration
   if (conf.version != VERSION) setDefault();
   
-  delay(MY_ADDRESS * 1000);
-  //send_conf(); 
+  // Delay 10 seconds to send conf
+  delay(10000);
+  RS485.begin(19200, MY_ADDRESS);
+  sendConf();
  
   previousMillis = millis();
   readerMillis   = millis(); 
   tempMillis     = millis(); 
-  aliveMillis    = millis() + 600000; // Do ping at start
+  aliveMillis    = millis();
 
-  p = iButton; // Do beep at startup
   //mySerial.begin(19200);
 }
-
+/*
+ * main task
+ */
 void loop() {
   // Look for incomming transmissions
   i = RS485.readMsg(&in_msg);
@@ -145,8 +175,13 @@ void loop() {
     // Commands from gateway
     if (in_msg.ctrl == FLAG_CMD) {
       switch (in_msg.data_length) {
-        case 1: send_conf(); break; // Request for registration
-        case 10 ... 16 : mode = in_msg.data_length; break; // Auth. commands
+        case 1: sendConf(); break; // Request for registration
+        case 10 ... 16 : // Auth. commands
+          mode = in_msg.data_length;
+          // Change keyDelay based on mode, armed or arming allows faster disarm.        
+          if (mode == 16) keyDelay = KEY_DELAY;
+          else keyDelay = KEY_DELAY_ARMED;
+          break; 
         default: break;
       }
     }
@@ -220,17 +255,18 @@ void loop() {
         ds.reset_search(); 
       } 
     }
-    if ((unsigned long)(millis() - readerMillis) > 1400){
+    // Try to send key after keyDelay based on mode
+    if ((unsigned long)(millis() - readerMillis) > keyDelay){
       // We have at least one good key
       if (iButtonRead > 0) {
         out_msg.address = 0;
         out_msg.ctrl = FLAG_DTA;
         out_msg.data_length = 11;
-        out_msg.buffer[0] = 'K'; 
-        out_msg.buffer[1] = 'i'; 
+        out_msg.buffer[0] = conf.reg[0]; 
+        out_msg.buffer[1] = conf.reg[1];
         // If iButton is held at reader or just touched
-        if (iButtonRead > 4) out_msg.buffer[2] = 1; 
-        else                 out_msg.buffer[2] = 0; 
+        if (iButtonRead > 4) out_msg.buffer[2] = conf.reg[2] + 1;
+        else                 out_msg.buffer[2] = conf.reg[2] + 0;
         memcpy(&out_msg.buffer[3], &key[0], sizeof(key));
         // Send 
         if (RS485.sendMsgWithAck(&out_msg, RS485_REPEAT)) {
@@ -239,32 +275,23 @@ void loop() {
         else {
           p = wrongkey; // play
         }
-        iButtonRead = -1; // Temporarly disable scanning 
+        iButtonRead = -3; // Temporarily disable scanning 
         memset(&key[0], 0x0, sizeof(key)); // Clear the key
       } else {
-        iButtonRead = 0; // Enable scanning
+        if (iButtonRead < 0) iButtonRead++; // Add up to 0, to enable scanning
       }
       readerMillis = millis();
     }    
   } // Tones 
 
-  // Temperature readings
-  if ((unsigned long)(millis() - tempMillis) > 300000) {
-    tempMillis = millis();
-    u.fval = (((float)analogRead(A6) * 0.003223)-0.5)*100;  
-    out_msg.address = 0;
-    out_msg.ctrl = FLAG_DTA;
-    out_msg.data_length = 7;
-    out_msg.buffer[0] = 'S'; // Sensor
-    out_msg.buffer[1] = 'T'; // Temperature
-    out_msg.buffer[2] = 0;   // local address
-    out_msg.buffer[3] = u.b[0]; out_msg.buffer[4] = u.b[1];
-    out_msg.buffer[5] = u.b[2]; out_msg.buffer[6] = u.b[3];   
-    RS485.sendMsgWithAck(&out_msg, RS485_REPEAT);
+  // Temperature readings every SENSOR_DELAY
+  if ((long)(millis() - tempMillis) >= SENSOR_DELAY) {
+    tempMillis = millis();    
+    sendValue(1, ((((float)analogRead(A6) * 0.003223)-0.5)*100)); // Send it to GW
   }
 
-  // Send alive packet every 10 minutes
-  if ((unsigned long)(millis() - aliveMillis) > 600000){
+  // Send alive packet every PING_DELAY
+  if ((unsigned long)(millis() - aliveMillis) > PING_DELAY){
     aliveMillis = millis();
     out_msg.address = 0;
     out_msg.ctrl = FLAG_CMD;
