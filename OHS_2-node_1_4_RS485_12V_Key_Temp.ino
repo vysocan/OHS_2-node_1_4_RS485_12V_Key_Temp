@@ -123,6 +123,8 @@ void setDefault(){
   conf.reg[4+(REG_LEN*1)]  = B00011111; // Default setting, group='not set', enabled
   memset(&conf.reg[5+(REG_LEN*1)], 0, NODE_NAME_SIZE);
   strcpy(&conf.reg[5+(REG_LEN*1)], "Temperature"); // Set default name
+
+  eeprom_update_block((const void*)&conf, (void*)0, sizeof(conf)); // Save current configuration 
 }
 /*
  * Send float value to gateway 
